@@ -1,0 +1,5 @@
+Total records before cleaning: 13536
+Total records after cleaning: 13397
+Total records with nationality = "Unknown" before cleaning: 219
+Total records with missing market_value_eur_m before cleaning: 271
+Total records after string standardization: 13440
