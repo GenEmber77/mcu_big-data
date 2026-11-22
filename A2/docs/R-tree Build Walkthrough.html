@@ -1,0 +1,470 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>R-tree Build Walkthrough</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: drafting-table workbench. Two linked drawings (data space + tree) over a caption strip, with the 17-step procedure as a side rail. */
+:root {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --ink: #16202b;
+  --muted: #5a6878;
+  --line: #d5dce5;
+  --grid: #e7ecf1;
+  --accent: #0d6a8a;
+  --accent-soft: #d9eef5;
+  --warn: #c03a26;
+  --warn-soft: #fbe3df;
+  --c0: #2c5fae;
+  --c1: #c2671a;
+  --c2: #7b4fa6;
+  --c3: #2d8657;
+  --c4: #a6436f;
+  --c5: #5b7d1e;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #19212a; --ink: #e5ebf1; --muted: #98a6b5; --line: #2c3743; --grid: #222b35;
+    --accent: #4fb4d6; --accent-soft: #163847; --warn: #f06a54; --warn-soft: #3d1f1b;
+    --c0: #6f9be3; --c1: #e79a52; --c2: #b78ce0; --c3: #5fc28d; --c4: #e07fab; --c5: #a3c55b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #19212a; --ink: #e5ebf1; --muted: #98a6b5; --line: #2c3743; --grid: #222b35;
+  --accent: #4fb4d6; --accent-soft: #163847; --warn: #f06a54; --warn-soft: #3d1f1b;
+  --c0: #6f9be3; --c1: #e79a52; --c2: #b78ce0; --c3: #5fc28d; --c4: #e07fab; --c5: #a3c55b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 32px;
+}
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: grid; gap: 4px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+h1 { font-size: clamp(22px, 3vw, 30px); line-height: 1.15; margin: 0; text-wrap: balance; font-weight: 700; }
+.lede { margin: 0; color: var(--muted); max-width: 70ch; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.stage { display: grid; gap: 0; }
+.drawings { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
+@media (max-width: 720px) { .drawings { grid-template-columns: minmax(0, 1fr); } }
+.drawing { padding: 12px 12px 6px; min-width: 0; }
+.drawing + .drawing { border-left: 1px solid var(--line); }
+@media (max-width: 720px) { .drawing + .drawing { border-left: 0; border-top: 1px solid var(--line); } }
+.drawing h2 { margin: 0 0 4px; font-size: 12px; font-family: var(--font-mono); font-weight: 500; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+svg { display: block; width: 100%; height: auto; }
+
+.caption { border-top: 1px solid var(--line); padding: 14px 16px; display: grid; gap: 6px; min-height: 112px; }
+.cap-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.cap-title { font-size: 18px; font-weight: 600; margin: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-family: var(--font-mono); font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.cap-text { margin: 0; max-width: 78ch; }
+
+.controls { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.controls button, .controls select {
+  font: 500 13px var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; min-height: 34px;
+}
+.controls button:hover, .controls select:hover { border-color: var(--accent); }
+.controls button:focus-visible, .controls select:focus-visible, input[type=range]:focus-visible, .step-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#play { background: var(--accent); color: var(--panel); border-color: var(--accent); min-width: 78px; font-weight: 600; }
+#scrub { flex: 1 1 160px; min-width: 120px; accent-color: var(--accent); }
+.counter { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
+
+.points { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--line); align-items: center; }
+.points .lbl { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.pt { font-family: var(--font-mono); font-size: 12px; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
+.pt.done { color: var(--ink); background: var(--bg); }
+.pt.now { border-color: var(--accent); color: var(--accent); font-weight: 600; background: var(--accent-soft); }
+
+.detail { padding: 12px 16px 14px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+.detail h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.detail .scroll { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 12.5px; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+td.mono { font-family: var(--font-mono); font-size: 12px; }
+tr.win td { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+.detail .note { margin: 0; color: var(--muted); font-size: 13px; }
+
+aside.steps { padding: 14px 14px 10px; display: grid; gap: 10px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+@media (max-width: 980px) { aside.steps { position: static; } }
+aside h2 { margin: 0; font-size: 14px; }
+.group { display: grid; gap: 2px; }
+.group-name { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 4px 0 2px; }
+.step-btn { display: grid; grid-template-columns: 26px 1fr; gap: 6px; align-items: start; text-align: left; width: 100%;
+  font: 13px/1.35 var(--font-body); color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 4px 6px; }
+.step-btn .n { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.step-btn.active { background: var(--accent-soft); color: var(--ink); font-weight: 500; }
+.step-btn.active .n { color: var(--accent); font-weight: 600; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); padding: 0 2px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* SVG styling */
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.axis-t { fill: var(--muted); font: 9px var(--font-mono); }
+.pt-lbl { fill: var(--ink); font: 600 10px var(--font-mono); }
+.pt-lbl.wait { fill: var(--muted); font-weight: 400; }
+.node-lbl { font: 700 11px var(--font-body); }
+.tbox-t { font: 600 11.5px var(--font-body); fill: var(--ink); }
+.tbox-m { font: 10px var(--font-mono); fill: var(--muted); }
+.tbox-e { font: 600 10.5px var(--font-mono); fill: var(--ink); }
+.badge-t { font: 700 10px var(--font-mono); }
+.pop { animation: pop .45s ease-out; transform-box: fill-box; transform-origin: center; }
+@keyframes pop { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
+.pulse { animation: pulse 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pop, .pulse { animation: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Task 1 · Part B · R-tree construction · B = 4</div>
+    <h1>R-tree Build Walkthrough</h1>
+    <p class="lede">The ten points from <code>NN_BaB_search.txt</code> are inserted one at a time by <code>rtree_simple.py</code>. Each frame is one step of the insertion procedure; the step numbers match the list on the right.</p>
+  </header>
+
+  <div class="layout">
+    <section class="panel stage" aria-label="Animation">
+      <div class="drawings">
+        <div class="drawing">
+          <h2>Data space</h2>
+          <svg id="space" viewBox="0 0 330 330" role="img" aria-label="Points and rectangles in the data space"></svg>
+        </div>
+        <div class="drawing">
+          <h2>Tree</h2>
+          <svg id="tree" viewBox="0 0 420 300" role="img" aria-label="R-tree structure"></svg>
+        </div>
+      </div>
+      <div class="points" id="points"><span class="lbl">Points</span></div>
+      <div class="caption" aria-live="polite">
+        <div class="cap-head">
+          <p class="cap-title" id="title"></p>
+          <div class="chips" id="chips"></div>
+        </div>
+        <p class="cap-text" id="text"></p>
+      </div>
+      <div class="detail" id="detail" hidden></div>
+      <div class="controls">
+        <button id="first" type="button" aria-label="First frame">⏮</button>
+        <button id="prev" type="button" aria-label="Previous frame">◀ Back</button>
+        <button id="play" type="button">Play</button>
+        <button id="next" type="button" aria-label="Next frame">Next ▶</button>
+        <button id="last" type="button" aria-label="Last frame">⏭</button>
+        <input id="scrub" type="range" min="0" value="0" aria-label="Frame">
+        <select id="speed" aria-label="Speed">
+          <option value="3200">Slow</option>
+          <option value="2000" selected>Normal</option>
+          <option value="1100">Fast</option>
+        </select>
+        <span class="counter" id="counter"></span>
+      </div>
+      <div class="legend" style="padding: 0 14px 12px;">
+        <span><i class="sw" style="border:1.5px dashed var(--ink)"></i>Internal node</span>
+        <span><i class="sw" style="background:color-mix(in srgb, var(--c0) 18%, transparent); border:1.5px solid var(--c0)"></i>Leaf node</span>
+        <span><i class="sw" style="border:2px dashed var(--warn)"></i>Over-full node</span>
+        <span><i class="sw" style="border:1.5px dashed var(--accent)"></i>Candidate rectangle</span>
+      </div>
+    </section>
+
+    <aside class="panel steps" aria-label="Insertion steps">
+      <h2>Inserting a point</h2>
+      <div id="steplist"></div>
+      <p class="note" style="margin:0;font-size:12px;color:var(--muted)">Click a step to jump to its next use.</p>
+    </aside>
+  </div>
+</div>
+
+<script>
+const DATA = {"points": [[1, 2.0, 3.0], [2, 8.0, 2.0], [3, 4.0, 9.0], [4, 9.0, 4.0], [5, 1.0, 10.0], [6, 7.0, 7.0], [7, 10.0, 1.0], [8, 8.0, 9.0], [9, 5.0, 5.0], [10, 10.0, 8.0]], "B": 4, "m": 2, "frames": [{"steps": [], "title": "Ten points to insert", "text": "The tree starts as one empty leaf N0, which is also the root. Points are inserted in file order with B = 4, so a node may hold at most 4 entries and each half of a split keeps at least m = 2.", "inserted": [], "cur": null, "hl": {}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": null, "kids": []}]}, {"steps": [1], "title": "Insert p1 (2, 3)", "text": "Start at the root N0. The root is still a leaf, so there is no child to choose.", "inserted": [], "cur": 1, "hl": {"node": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": null, "kids": []}]}, {"steps": [5, 6], "title": "Add p1 to leaf N0", "text": "N0 is a leaf, so p1 is added to it. N0 now holds 1 entry (B = 4).", "inserted": [1], "cur": 1, "hl": {"node": 0, "stale": true}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": null, "kids": [1]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N0 so every rectangle covers its contents.", "inserted": [1], "cur": 1, "hl": {"node": 0, "path": [0]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 3.0, 2.0, 3.0], "kids": [1]}]}, {"steps": [1], "title": "Insert p2 (8, 2)", "text": "Start at the root N0. The root is still a leaf, so there is no child to choose.", "inserted": [1], "cur": 2, "hl": {"node": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 3.0, 2.0, 3.0], "kids": [1]}]}, {"steps": [5, 6], "title": "Add p2 to leaf N0", "text": "N0 is a leaf, so p2 is added to it. N0 now holds 2 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2], "cur": 2, "hl": {"node": 0, "stale": true}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 3.0, 2.0, 3.0], "kids": [1, 2]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N0 so every rectangle covers its contents.", "inserted": [1, 2], "cur": 2, "hl": {"node": 0, "path": [0]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 3.0], "kids": [1, 2]}]}, {"steps": [1], "title": "Insert p3 (4, 9)", "text": "Start at the root N0. The root is still a leaf, so there is no child to choose.", "inserted": [1, 2], "cur": 3, "hl": {"node": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 3.0], "kids": [1, 2]}]}, {"steps": [5, 6], "title": "Add p3 to leaf N0", "text": "N0 is a leaf, so p3 is added to it. N0 now holds 3 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3], "cur": 3, "hl": {"node": 0, "stale": true}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 3.0], "kids": [1, 2, 3]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N0 so every rectangle covers its contents.", "inserted": [1, 2, 3], "cur": 3, "hl": {"node": 0, "path": [0]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 9.0], "kids": [1, 2, 3]}]}, {"steps": [1], "title": "Insert p4 (9, 4)", "text": "Start at the root N0. The root is still a leaf, so there is no child to choose.", "inserted": [1, 2, 3], "cur": 4, "hl": {"node": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 9.0], "kids": [1, 2, 3]}]}, {"steps": [5, 6], "title": "Add p4 to leaf N0", "text": "N0 is a leaf, so p4 is added to it. N0 now holds 4 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4], "cur": 4, "hl": {"node": 0, "stale": true}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 8.0, 9.0], "kids": [1, 2, 3, 4]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N0 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4], "cur": 4, "hl": {"node": 0, "path": [0]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 9.0, 9.0], "kids": [1, 2, 3, 4]}]}, {"steps": [1], "title": "Insert p5 (1, 10)", "text": "Start at the root N0. The root is still a leaf, so there is no child to choose.", "inserted": [1, 2, 3, 4], "cur": 5, "hl": {"node": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 9.0, 9.0], "kids": [1, 2, 3, 4]}]}, {"steps": [5, 6], "title": "Add p5 to leaf N0", "text": "N0 is a leaf, so p5 is added to it. N0 now holds 5 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5], "cur": 5, "hl": {"node": 0, "stale": true}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 9.0, 9.0], "kids": [1, 2, 3, 4, 5]}]}, {"steps": [8], "title": "Overflow at N0", "text": "N0 holds 5 entries, more than B = 4. It must be split.", "inserted": [1, 2, 3, 4, 5], "cur": 5, "hl": {"node": 0, "overflow": 0}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 9.0, 9.0], "kids": [1, 2, 3, 4, 5]}]}, {"steps": [9, 10, 11, 12], "title": "Try every cut of N0", "text": "Sort the entries by x, then by y, and try every cut that leaves at least m = 2 on each side. The smallest total perimeter is 26 (x-axis, k = 3); 2 cuts tie, so the first one tried wins.", "inserted": [1, 2, 3, 4, 5], "cur": 5, "hl": {"node": 0, "overflow": 0, "kind": "split", "rows": [{"axis": "x", "k": 2, "order": "p5 p1 p3 p2 p4", "g1": "p5 p1", "g2": "p3 p2 p4", "p1": "16", "p2": "24", "total": "40", "b1": [1.0, 3.0, 2.0, 10.0], "b2": [4.0, 2.0, 9.0, 9.0]}, {"axis": "x", "k": 3, "order": "p5 p1 p3 p2 p4", "g1": "p5 p1 p3", "g2": "p2 p4", "p1": "20", "p2": "6", "total": "26", "b1": [1.0, 3.0, 4.0, 10.0], "b2": [8.0, 2.0, 9.0, 4.0]}, {"axis": "y", "k": 2, "order": "p2 p1 p4 p3 p5", "g1": "p2 p1", "g2": "p4 p3 p5", "p1": "14", "p2": "28", "total": "42", "b1": [2.0, 2.0, 8.0, 3.0], "b2": [1.0, 4.0, 9.0, 10.0]}, {"axis": "y", "k": 3, "order": "p2 p1 p4 p3 p5", "g1": "p2 p1 p4", "g2": "p3 p5", "p1": "18", "p2": "8", "total": "26", "b1": [2.0, 2.0, 9.0, 4.0], "b2": [1.0, 9.0, 4.0, 10.0]}], "chosenRow": 1, "g1": [1.0, 3.0, 4.0, 10.0], "g2": [8.0, 2.0, 9.0, 4.0]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [2.0, 2.0, 9.0, 9.0], "kids": [1, 2, 3, 4, 5]}]}, {"steps": [13], "title": "Split N0 into N0 and N1", "text": "N0 keeps {p5, p1, p3}. The new node N1 gets {p2, p4}. Both rectangles are recalculated.", "inserted": [1, 2, 3, 4, 5], "cur": 5, "hl": {"node": 0, "fresh": [1], "pair": [0, 1]}, "root": 0, "nodes": [{"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}]}, {"steps": [14], "title": "New root N2", "text": "The node that split was the root. A new root N2 is made above N0 and N1. The tree is now 2 levels tall.", "inserted": [1, 2, 3, 4, 5], "cur": 5, "hl": {"node": 2, "fresh": [2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 2.0, 9.0, 4.0], "kids": [2, 4]}]}, {"steps": [1], "title": "Insert p6 (7, 7)", "text": "Start at the root N2. It is an internal node, so a child must be chosen.", "inserted": [1, 2, 3, 4, 5], "cur": 6, "hl": {"node": 2}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 2.0, 9.0, 4.0], "kids": [2, 4]}]}, {"steps": [2, 3, 4], "title": "Choose a child of N2", "text": "For each child, work out how much its rectangle must grow to cover p6. N1 needs the smallest increase (8), so go into N1.", "inserted": [1, 2, 3, 4, 5], "cur": 6, "hl": {"node": 2, "chosen": 1, "cands": [{"id": 0, "mbr": "[(1, 3), (4, 10)]", "area": "21", "new": "[(1, 3), (7, 10)]", "newArea": "42", "inc": "21"}, {"id": 1, "mbr": "[(8, 2), (9, 4)]", "area": "2", "new": "[(7, 2), (9, 7)]", "newArea": "10", "inc": "8"}], "enlarge": [[0, 1.0, 3.0, 7.0, 10.0], [1, 7.0, 2.0, 9.0, 7.0]], "kind": "choose"}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 2.0, 9.0, 4.0], "kids": [2, 4]}]}, {"steps": [5, 6], "title": "Add p6 to leaf N1", "text": "N1 is a leaf, so p6 is added to it. N1 now holds 3 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5, 6], "cur": 6, "hl": {"node": 1, "stale": true}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 2.0, 9.0, 4.0], "kids": [2, 4, 6]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N1 \u2192 N2 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4, 5, 6], "cur": 6, "hl": {"node": 1, "path": [1, 2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 2.0, 9.0, 7.0], "kids": [2, 4, 6]}]}, {"steps": [1], "title": "Insert p7 (10, 1)", "text": "Start at the root N2. It is an internal node, so a child must be chosen.", "inserted": [1, 2, 3, 4, 5, 6], "cur": 7, "hl": {"node": 2}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 2.0, 9.0, 7.0], "kids": [2, 4, 6]}]}, {"steps": [2, 3, 4], "title": "Choose a child of N2", "text": "For each child, work out how much its rectangle must grow to cover p7. N1 needs the smallest increase (8), so go into N1.", "inserted": [1, 2, 3, 4, 5, 6], "cur": 7, "hl": {"node": 2, "chosen": 1, "cands": [{"id": 0, "mbr": "[(1, 3), (4, 10)]", "area": "21", "new": "[(1, 1), (10, 10)]", "newArea": "81", "inc": "60"}, {"id": 1, "mbr": "[(7, 2), (9, 7)]", "area": "10", "new": "[(7, 1), (10, 7)]", "newArea": "18", "inc": "8"}], "enlarge": [[0, 1.0, 1.0, 10.0, 10.0], [1, 7.0, 1.0, 10.0, 7.0]], "kind": "choose"}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 2.0, 9.0, 7.0], "kids": [2, 4, 6]}]}, {"steps": [5, 6], "title": "Add p7 to leaf N1", "text": "N1 is a leaf, so p7 is added to it. N1 now holds 4 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5, 6, 7], "cur": 7, "hl": {"node": 1, "stale": true}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 2.0, 9.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 2.0, 9.0, 7.0], "kids": [2, 4, 6, 7]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N1 \u2192 N2 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4, 5, 6, 7], "cur": 7, "hl": {"node": 1, "path": [1, 2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7]}]}, {"steps": [1], "title": "Insert p8 (8, 9)", "text": "Start at the root N2. It is an internal node, so a child must be chosen.", "inserted": [1, 2, 3, 4, 5, 6, 7], "cur": 8, "hl": {"node": 2}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7]}]}, {"steps": [2, 3, 4], "title": "Choose a child of N2", "text": "For each child, work out how much its rectangle must grow to cover p8. N1 needs the smallest increase (6), so go into N1.", "inserted": [1, 2, 3, 4, 5, 6, 7], "cur": 8, "hl": {"node": 2, "chosen": 1, "cands": [{"id": 0, "mbr": "[(1, 3), (4, 10)]", "area": "21", "new": "[(1, 3), (8, 10)]", "newArea": "49", "inc": "28"}, {"id": 1, "mbr": "[(7, 1), (10, 7)]", "area": "18", "new": "[(7, 1), (10, 9)]", "newArea": "24", "inc": "6"}], "enlarge": [[0, 1.0, 3.0, 8.0, 10.0], [1, 7.0, 1.0, 10.0, 9.0]], "kind": "choose"}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7]}]}, {"steps": [5, 6], "title": "Add p8 to leaf N1", "text": "N1 is a leaf, so p8 is added to it. N1 now holds 5 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 1, "stale": true}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7, 8]}]}, {"steps": [8], "title": "Overflow at N1", "text": "N1 holds 5 entries, more than B = 4. It must be split.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 1, "overflow": 1}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7, 8]}]}, {"steps": [9, 10, 11, 12], "title": "Try every cut of N1", "text": "Sort the entries by x, then by y, and try every cut that leaves at least m = 2 on each side. The smallest total perimeter is 16 (y-axis, k = 3).", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 1, "overflow": 1, "kind": "split", "rows": [{"axis": "x", "k": 2, "order": "p6 p2 p8 p4 p7", "g1": "p6 p2", "g2": "p8 p4 p7", "p1": "12", "p2": "20", "total": "32", "b1": [7.0, 2.0, 8.0, 7.0], "b2": [8.0, 1.0, 10.0, 9.0]}, {"axis": "x", "k": 3, "order": "p6 p2 p8 p4 p7", "g1": "p6 p2 p8", "g2": "p4 p7", "p1": "16", "p2": "8", "total": "24", "b1": [7.0, 2.0, 8.0, 9.0], "b2": [9.0, 1.0, 10.0, 4.0]}, {"axis": "y", "k": 2, "order": "p7 p2 p4 p6 p8", "g1": "p7 p2", "g2": "p4 p6 p8", "p1": "6", "p2": "14", "total": "20", "b1": [8.0, 1.0, 10.0, 2.0], "b2": [7.0, 4.0, 9.0, 9.0]}, {"axis": "y", "k": 3, "order": "p7 p2 p4 p6 p8", "g1": "p7 p2 p4", "g2": "p6 p8", "p1": "10", "p2": "6", "total": "16", "b1": [8.0, 1.0, 10.0, 4.0], "b2": [7.0, 7.0, 8.0, 9.0]}], "chosenRow": 3, "g1": [8.0, 1.0, 10.0, 4.0], "g2": [7.0, 7.0, 8.0, 9.0]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [7.0, 1.0, 10.0, 7.0], "kids": [2, 4, 6, 7, 8]}]}, {"steps": [13], "title": "Split N1 into N1 and N3", "text": "N1 keeps {p7, p2, p4}. The new node N3 gets {p6, p8}. Both rectangles are recalculated.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 1, "fresh": [3], "pair": [1, 3]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}]}, {"steps": [15, 16], "title": "Add N3 to parent N2", "text": "The new node N3 joins the same parent N2, which now has 3 children. That is not more than B = 4, so no further split is needed.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 2, "fresh": [3]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [17], "title": "Update rectangles", "text": "Recalculate the MBR of N2 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 8, "hl": {"node": 2, "path": [2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [1], "title": "Insert p9 (5, 5)", "text": "Start at the root N2. It is an internal node, so a child must be chosen.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 9, "hl": {"node": 2}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [2, 3, 4], "title": "Choose a child of N2", "text": "For each child, work out how much its rectangle must grow to cover p9. N0 needs the smallest increase (7), so go into N0.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8], "cur": 9, "hl": {"node": 2, "chosen": 0, "cands": [{"id": 0, "mbr": "[(1, 3), (4, 10)]", "area": "21", "new": "[(1, 3), (5, 10)]", "newArea": "28", "inc": "7"}, {"id": 1, "mbr": "[(8, 1), (10, 4)]", "area": "6", "new": "[(5, 1), (10, 5)]", "newArea": "20", "inc": "14"}, {"id": 3, "mbr": "[(7, 7), (8, 9)]", "area": "2", "new": "[(5, 5), (8, 9)]", "newArea": "12", "inc": "10"}], "enlarge": [[0, 1.0, 3.0, 5.0, 10.0], [1, 5.0, 1.0, 10.0, 5.0], [3, 5.0, 5.0, 8.0, 9.0]], "kind": "choose"}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [5, 6], "title": "Add p9 to leaf N0", "text": "N0 is a leaf, so p9 is added to it. N0 now holds 4 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9], "cur": 9, "hl": {"node": 0, "stale": true}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 4.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N0 \u2192 N2 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9], "cur": 9, "hl": {"node": 0, "path": [0, 2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [1], "title": "Insert p10 (10, 8)", "text": "Start at the root N2. It is an internal node, so a child must be chosen.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9], "cur": 10, "hl": {"node": 2}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [2, 3, 4], "title": "Choose a child of N2", "text": "For each child, work out how much its rectangle must grow to cover p10. N3 needs the smallest increase (4), so go into N3.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9], "cur": 10, "hl": {"node": 2, "chosen": 3, "cands": [{"id": 0, "mbr": "[(1, 3), (5, 10)]", "area": "28", "new": "[(1, 3), (10, 10)]", "newArea": "63", "inc": "35"}, {"id": 1, "mbr": "[(8, 1), (10, 4)]", "area": "6", "new": "[(8, 1), (10, 8)]", "newArea": "14", "inc": "8"}, {"id": 3, "mbr": "[(7, 7), (8, 9)]", "area": "2", "new": "[(7, 7), (10, 9)]", "newArea": "6", "inc": "4"}], "enlarge": [[0, 1.0, 3.0, 10.0, 10.0], [1, 8.0, 1.0, 10.0, 8.0], [3, 7.0, 7.0, 10.0, 9.0]], "kind": "choose"}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8]}]}, {"steps": [5, 6], "title": "Add p10 to leaf N3", "text": "N3 is a leaf, so p10 is added to it. N3 now holds 3 entries (B = 4). The rectangle has not been updated yet.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "cur": 10, "hl": {"node": 3, "stale": true}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 8.0, 9.0], "kids": [6, 8, 10]}]}, {"steps": [7], "title": "Update rectangles", "text": "No overflow. Recalculate the MBR of N3 \u2192 N2 so every rectangle covers its contents.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "cur": 10, "hl": {"node": 3, "path": [3, 2]}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 10.0, 9.0], "kids": [6, 8, 10]}]}, {"steps": [], "title": "Finished", "text": "All 10 points are in the tree: root N2 with 3 leaves, 2 levels tall. Every leaf holds between 2 and 4 points.", "inserted": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "cur": null, "hl": {}, "root": 2, "nodes": [{"id": 2, "leaf": false, "mbr": [1.0, 1.0, 10.0, 10.0], "kids": [0, 1, 3]}, {"id": 0, "leaf": true, "mbr": [1.0, 3.0, 5.0, 10.0], "kids": [5, 1, 3, 9]}, {"id": 1, "leaf": true, "mbr": [8.0, 1.0, 10.0, 4.0], "kids": [7, 2, 4]}, {"id": 3, "leaf": true, "mbr": [7.0, 7.0, 10.0, 9.0], "kids": [6, 8, 10]}]}]};
+const STEPS = [
+  ["Find a leaf", [
+    [1, "Start at the root."],
+    [2, "At an internal node, look at each child."],
+    [3, "Work out how much each child's rectangle must grow in area."],
+    [4, "Go into the child with the smallest increase (tie: smaller area)."],
+    [5, "Repeat until you reach a leaf."]]],
+  ["Add the point", [
+    [6, "Add the point to the leaf."],
+    [7, "No overflow: update rectangles up to the root."]]],
+  ["Split an over-full node", [
+    [8, "Overflow: the node has B + 1 entries."],
+    [9, "Sort by x and try every cut (each side keeps at least m)."],
+    [10, "Sort by y and try every cut."],
+    [11, "Add up the two perimeters for each cut."],
+    [12, "Pick the smallest total (tie: first one tried)."],
+    [13, "Node keeps group 1; a new node gets group 2."]]],
+  ["Fix parents and root", [
+    [14, "If the root split, make a new root above both halves."],
+    [15, "Otherwise add the new node to the same parent."],
+    [16, "If the parent is now over-full, split it too."],
+    [17, "Update rectangles up to the root."]]]
+];
+
+const NS = "http://www.w3.org/2000/svg";
+const frames = DATA.frames;
+let idx = 0, timer = null;
+
+const $ = id => document.getElementById(id);
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const colorOf = id => `var(--c${id % 6})`;
+const fmtBox = b => b ? `[(${+b[0]}, ${+b[1]}), (${+b[2]}, ${+b[3]})]` : "empty";
+
+/* ---------- step list ---------- */
+const stepBtns = {};
+(function buildSteps() {
+  const host = $("steplist");
+  for (const [name, items] of STEPS) {
+    const g = document.createElement("div"); g.className = "group";
+    const h = document.createElement("div"); h.className = "group-name"; h.textContent = name; g.appendChild(h);
+    for (const [n, txt] of items) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "step-btn";
+      b.innerHTML = `<span class="n">${n}</span><span>${txt}</span>`;
+      b.addEventListener("click", () => {
+        for (let k = 1; k <= frames.length; k++) {
+          const j = (idx + k) % frames.length;
+          if (frames[j].steps.includes(n)) { stop(); show(j); return; }
+        }
+      });
+      stepBtns[n] = b; g.appendChild(b);
+    }
+    host.appendChild(g);
+  }
+})();
+
+/* ---------- point chips ---------- */
+const ptChips = {};
+for (const [id] of DATA.points) {
+  const s = document.createElement("span"); s.className = "pt"; s.textContent = "p" + id;
+  ptChips[id] = s; $("points").appendChild(s);
+}
+
+/* ---------- data space ---------- */
+const SP = { size: 330, ml: 26, mb: 22, mt: 10, mr: 10, max: 11 };
+const sx = v => SP.ml + v * (SP.size - SP.ml - SP.mr) / SP.max;
+const sy = v => SP.size - SP.mb - v * (SP.size - SP.mb - SP.mt) / SP.max;
+const scale = (SP.size - SP.ml - SP.mr) / SP.max;
+
+function drawSpace(f, prev) {
+  const svg = $("space"); svg.innerHTML = "";
+  for (let v = 0; v <= SP.max; v++) {
+    el("line", { x1: sx(v), y1: sy(0), x2: sx(v), y2: sy(SP.max), class: "gridline" }, svg);
+    el("line", { x1: sx(0), y1: sy(v), x2: sx(SP.max), y2: sy(v), class: "gridline" }, svg);
+    const tx = el("text", { x: sx(v), y: sy(0) + 13, "text-anchor": "middle", class: "axis-t" }, svg); tx.textContent = v;
+    const ty = el("text", { x: sx(0) - 6, y: sy(v) + 3, "text-anchor": "end", class: "axis-t" }, svg); ty.textContent = v;
+  }
+  const nodes = Object.fromEntries(f.nodes.map(n => [n.id, n]));
+  const hl = f.hl || {};
+  const leafOf = {};
+  for (const n of f.nodes) if (n.leaf) for (const p of n.kids) leafOf[p] = n.id;
+
+  // depth for padding
+  const depth = {}; (function walk(id, d) { depth[id] = d; const n = nodes[id]; if (!n.leaf) n.kids.forEach(k => walk(k, d + 1)); })(f.root, 0);
+  const maxD = Math.max(...Object.values(depth));
+
+  // internal nodes first (behind)
+  for (const n of f.nodes) {
+    if (n.leaf || !n.mbr) continue;
+    const pad = 4 + 6 * (maxD - depth[n.id]);
+    const r = rectFor(n.mbr, pad);
+    const isNew = (hl.fresh || []).includes(n.id);
+    el("rect", { ...r, fill: "none", stroke: "var(--ink)", "stroke-width": 1.3, "stroke-dasharray": "5 3", rx: 3,
+      class: isNew ? "pop" : "" }, svg);
+    const t = el("text", { x: r.x + r.width - 2, y: r.y - 4, "text-anchor": "end", class: "node-lbl", fill: "var(--ink)" }, svg);
+    t.textContent = `N${n.id}${n.id === f.root ? " (root)" : ""}`;
+  }
+  // candidate enlargements
+  if (hl.kind === "choose") {
+    for (const [cid, x1, y1, x2, y2] of hl.enlarge) {
+      const r = rectFor([x1, y1, x2, y2], 4);
+      el("rect", { ...r, fill: "none", stroke: cid === hl.chosen ? "var(--accent)" : colorOf(cid),
+        "stroke-width": cid === hl.chosen ? 2.2 : 1, "stroke-dasharray": "4 3", opacity: cid === hl.chosen ? 1 : .6, rx: 2, class: "pop" }, svg);
+    }
+  }
+  // leaves
+  for (const n of f.nodes) {
+    if (!n.leaf || !n.mbr) continue;
+    const r = rectFor(n.mbr, 4);
+    const over = hl.overflow === n.id;
+    const fresh = (hl.fresh || []).includes(n.id);
+    const stroke = over ? "var(--warn)" : colorOf(n.id);
+    el("rect", { ...r, fill: `color-mix(in srgb, ${colorOf(n.id)} 14%, transparent)`, stroke,
+      "stroke-width": over ? 2.2 : (hl.node === n.id || (hl.path || []).includes(n.id) ? 2.2 : 1.3),
+      "stroke-dasharray": over ? "5 3" : "", rx: 2, class: fresh ? "pop" : "" }, svg);
+    const t = el("text", { x: r.x + r.width + 3, y: r.y + r.height + 1, class: "node-lbl", fill: stroke }, svg);
+    t.textContent = `N${n.id}`;
+  }
+  // split preview
+  if (hl.kind === "split") {
+    [hl.g1, hl.g2].forEach((b, i) => {
+      const r = rectFor(b, 7);
+      el("rect", { ...r, fill: "none", stroke: "var(--accent)", "stroke-width": 1.8, "stroke-dasharray": i ? "2 3" : "7 3", rx: 3, class: "pop" }, svg);
+      const t = el("text", { x: r.x + 4, y: r.y + r.height - 5, class: "badge-t", fill: "var(--accent)" }, svg);
+      t.textContent = `group ${i + 1}`;
+    });
+  }
+  // points
+  const done = new Set(f.inserted);
+  for (const [id, x, y] of DATA.points) {
+    const isDone = done.has(id);
+    const isCur = f.cur === id;
+    const c = isDone && leafOf[id] !== undefined ? colorOf(leafOf[id]) : "var(--muted)";
+    if (isCur) el("circle", { cx: sx(x), cy: sy(y), r: 8, fill: "none", stroke: "var(--accent)", "stroke-width": 2, class: "pulse" }, svg);
+    el("circle", { cx: sx(x), cy: sy(y), r: isDone ? 4 : 3.5, fill: isDone ? c : "var(--panel)", stroke: c, "stroke-width": 1.4 }, svg);
+    const t = el("text", { x: sx(x) + 6, y: sy(y) - 5, class: "pt-lbl" + (isDone || isCur ? "" : " wait") }, svg);
+    t.textContent = "p" + id;
+  }
+}
+function rectFor(b, pad) {
+  const x = sx(b[0]) - pad, y = sy(b[3]) - pad;
+  return { x, y, width: (b[2] - b[0]) * scale + 2 * pad, height: (b[3] - b[1]) * scale + 2 * pad };
+}
+
+/* ---------- tree ---------- */
+function drawTree(f) {
+  const svg = $("tree"); svg.innerHTML = "";
+  const nodes = Object.fromEntries(f.nodes.map(n => [n.id, n]));
+  const hl = f.hl || {};
+  const W = 118, H = 74, GAP = 12, LV = 116;
+  // leaf order
+  const leaves = []; const depth = {};
+  (function walk(id, d) { depth[id] = d; const n = nodes[id]; if (n.leaf) leaves.push(id); else n.kids.forEach(k => walk(k, d + 1)); })(f.root, 0);
+  const maxD = Math.max(...Object.values(depth));
+  const totalW = leaves.length * W + (leaves.length - 1) * GAP;
+  const VW = Math.max(420, totalW + 20);
+  const contentH = maxD * LV + H + 14;
+  const VH = Math.max(contentH + 20, 300);
+  const top = (VH - contentH) / 2 + 12;
+  svg.setAttribute("viewBox", `0 0 ${VW} ${VH}`);
+  const pos = {};
+  const x0 = (VW - totalW) / 2;
+  leaves.forEach((id, i) => pos[id] = { x: x0 + i * (W + GAP), y: top + depth[id] * LV });
+  (function place(id) {
+    const n = nodes[id]; if (n.leaf) return;
+    n.kids.forEach(place);
+    const xs = n.kids.map(k => pos[k].x);
+    pos[id] = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: top + depth[id] * LV };
+  })(f.root);
+  // edges
+  for (const n of f.nodes) if (!n.leaf) for (const k of n.kids)
+    el("line", { x1: pos[n.id].x + W / 2, y1: pos[n.id].y + H, x2: pos[k].x + W / 2, y2: pos[k].y, stroke: "var(--line)", "stroke-width": 1.5,
+      class: (hl.fresh || []).includes(k) ? "pop" : "" }, svg);
+  // boxes
+  const incOf = {}; if (hl.kind === "choose") hl.cands.forEach(c => incOf[c.id] = c.inc);
+  for (const n of f.nodes) {
+    const { x, y } = pos[n.id];
+    const over = hl.overflow === n.id;
+    const active = hl.node === n.id || (hl.path || []).includes(n.id) || hl.chosen === n.id;
+    const fresh = (hl.fresh || []).includes(n.id);
+    const base = n.leaf ? colorOf(n.id) : "var(--ink)";
+    const stroke = over ? "var(--warn)" : (active ? "var(--accent)" : base);
+    const g = el("g", { class: fresh ? "pop" : "" }, svg);
+    el("rect", { x, y, width: W, height: H, rx: 6,
+      fill: over ? "var(--warn-soft)" : (hl.chosen === n.id ? "var(--accent-soft)" : "var(--panel)"),
+      stroke, "stroke-width": active || over ? 2.2 : 1.2, "stroke-dasharray": n.leaf ? "" : "5 3" }, g);
+    if (n.leaf) el("rect", { x, y, width: 5, height: H, rx: 2, fill: base }, g);
+    const t1 = el("text", { x: x + 11, y: y + 16, class: "tbox-t" }, g);
+    t1.textContent = `N${n.id} · ${n.id === f.root ? (n.leaf ? "root leaf" : "root") : (n.leaf ? "leaf" : "internal")}`;
+    const t2 = el("text", { x: x + 11, y: y + 31, class: "tbox-m" }, g);
+    t2.textContent = n.mbr ? `[(${+n.mbr[0]},${+n.mbr[1]}),(${+n.mbr[2]},${+n.mbr[3]})]` : "MBR: none yet";
+    const t3 = el("text", { x: x + 11, y: y + 49, class: "tbox-e" }, g);
+    t3.textContent = n.kids.length ? n.kids.map(k => (n.leaf ? "p" : "N") + k).join(" ") : "(empty)";
+    const t4 = el("text", { x: x + 11, y: y + 63, class: "tbox-m", fill: over ? "var(--warn)" : "var(--muted)" }, g);
+    t4.textContent = `${n.kids.length} / ${DATA.B} entries`;
+    if (over) t4.setAttribute("style", "fill:var(--warn);font-weight:600");
+    if (incOf[n.id] !== undefined) {
+      const bw = 40;
+      el("rect", { x: x + W - bw + 4, y: y - 10, width: bw, height: 18, rx: 9,
+        fill: hl.chosen === n.id ? "var(--accent)" : "var(--panel)", stroke: "var(--accent)", "stroke-width": 1.2 }, g);
+      const b = el("text", { x: x + W - bw / 2 + 4, y: y + 3, "text-anchor": "middle", class: "badge-t",
+        fill: hl.chosen === n.id ? "var(--panel)" : "var(--accent)" }, g);
+      b.textContent = "+" + incOf[n.id];
+    }
+  }
+}
+
+/* ---------- detail table ---------- */
+function drawDetail(f) {
+  const d = $("detail"); const hl = f.hl || {};
+  if (hl.kind === "choose") {
+    d.hidden = false;
+    d.innerHTML = `<h3>Area increase for each child</h3><div class="scroll"><table>
+      <thead><tr><th>Child</th><th>Current MBR</th><th>Area</th><th>MBR with new point</th><th>New area</th><th>Increase</th></tr></thead>
+      <tbody>${hl.cands.map(c => `<tr class="${c.id === hl.chosen ? "win" : ""}"><td>N${c.id}</td><td class="mono">${c.mbr}</td><td>${c.area}</td><td class="mono">${c.new}</td><td>${c.newArea}</td><td>+${c.inc}</td></tr>`).join("")}</tbody></table></div>`;
+  } else if (hl.kind === "split") {
+    d.hidden = false;
+    d.innerHTML = `<h3>Every valid cut (each side keeps at least m = ${DATA.m})</h3><div class="scroll"><table>
+      <thead><tr><th>Axis</th><th>Sorted order</th><th>k</th><th>Group 1</th><th>Perim.</th><th>Group 2</th><th>Perim.</th><th>Total</th></tr></thead>
+      <tbody>${hl.rows.map((r, i) => `<tr class="${i === hl.chosenRow ? "win" : ""}"><td>${r.axis}</td><td class="mono">${r.order}</td><td>${r.k}</td><td class="mono">${r.g1}</td><td>${r.p1}</td><td class="mono">${r.g2}</td><td>${r.p2}</td><td>${r.total}${i === hl.chosenRow ? " ✓" : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  } else {
+    d.hidden = true; d.innerHTML = "";
+  }
+}
+
+/* ---------- frame display ---------- */
+function show(i) {
+  idx = Math.max(0, Math.min(frames.length - 1, i));
+  const f = frames[idx];
+  drawSpace(f); drawTree(f); drawDetail(f);
+  $("title").textContent = f.title;
+  $("text").textContent = f.text;
+  $("chips").innerHTML = f.steps.map(s => `<span class="chip">Step ${s}</span>`).join("");
+  for (const n in stepBtns) stepBtns[n].classList.toggle("active", f.steps.includes(+n));
+  const done = new Set(f.inserted);
+  for (const id in ptChips) {
+    ptChips[id].className = "pt" + (f.cur === +id ? " now" : (done.has(+id) ? " done" : ""));
+  }
+  $("scrub").value = idx;
+  $("counter").textContent = `Frame ${idx + 1} / ${frames.length}`;
+}
+function play() {
+  if (idx >= frames.length - 1) show(0);
+  $("play").textContent = "Pause";
+  const tick = () => {
+    if (idx >= frames.length - 1) { stop(); return; }
+    show(idx + 1);
+    timer = setTimeout(tick, +$("speed").value);
+  };
+  timer = setTimeout(tick, +$("speed").value);
+}
+function stop() { clearTimeout(timer); timer = null; $("play").textContent = "Play"; }
+
+$("scrub").max = frames.length - 1;
+$("scrub").addEventListener("input", e => { stop(); show(+e.target.value); });
+$("play").addEventListener("click", () => timer ? stop() : play());
+$("next").addEventListener("click", () => { stop(); show(idx + 1); });
+$("prev").addEventListener("click", () => { stop(); show(idx - 1); });
+$("first").addEventListener("click", () => { stop(); show(0); });
+$("last").addEventListener("click", () => { stop(); show(frames.length - 1); });
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input, select")) return;
+  if (e.key === "ArrowRight") { stop(); show(idx + 1); }
+  else if (e.key === "ArrowLeft") { stop(); show(idx - 1); }
+  else if (e.key === " " && !e.target.closest("button")) { e.preventDefault(); timer ? stop() : play(); }
+});
+
+show(0);
+if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) play();
+</script>
+
+</body></html>
